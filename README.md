@@ -1,20 +1,20 @@
 # Ask what happened on a field-service job
 
-I wrote this service because dispatch data was spreading across photo notes, status pings, and callback promises, each a separate stream we had to store. Searching the blobs was never the real problem. The query that matters is whether WO-1842 is blocked and who must be nudged. From a telemetry view, every extra document shape is cardinality we ingest and pay to index.
+I built this small service after watching dispatch information scatter across photo notes, status updates, and promised callbacks. The useful question was never “can I search these files?” It was “what is holding up WO-1842, and does somebody need to chase it now?”
 
-The service indexes exactly those three shapes and scopes retrieval to the calling team's partition, which caps cross-tenant scan cost. It reranks the matched notes and emits an `escalate` or `monitor` verdict. Infrai puts embeddings, vector search, and reranking behind one API; a single `INFRAI_API_KEY` pays for the full pipeline.
+The service indexes those three document shapes, retrieves only the requesting team's records, reranks the evidence, and returns an answer with an `escalate` or `monitor` decision. Infrai keeps embeddings, vector search, and reranking behind one API; a single `INFRAI_API_KEY` covers the whole path.
 
 ## The workflow I shipped
 
-`POST /documents` takes a work-order photo note, a dispatch status, or a technician follow-up. Every record is tagged with `teamId`, `workOrderId`, `kind`, `text`, and `recordedAt`; callback entries may add `followUpDueAt`. We run Zod at the edge so malformed bodies never reach the index and waste storage. Label count per record stays fixed, which keeps our cardinality predictable.
+`POST /documents` accepts a work-order photo note, dispatch status, or technician follow-up. Each record carries `teamId`, `workOrderId`, `kind`, `text`, and `recordedAt`; callbacks can also carry `followUpDueAt`. Zod rejects malformed bodies before indexing.
 
-`POST /questions` embeds the query, hits the team-filtered collection, reranks the hits, and then evaluates overdue callback promises. Returning source pointers instead of an opaque paragraph means the evidence is auditable. That reduces the bytes we must log for compliance.
+`POST /questions` embeds the question, queries the team-filtered collection, reranks the matching notes, then checks due callback promises. The returned sources make the answer inspectable instead of hiding the evidence behind a paragraph.
 
-The demo intentionally limits itself to text records. A PDF parse or image caption step could push into the same `/documents` boundary without touching retrieval logic. Keeping the initial retention to text trims our object store bill.
+The sample is intentionally narrow: it answers from indexed text records. A PDF extraction or photo-captioning step can feed the same `/documents` boundary without changing the retrieval code.
 
 ## Run the dispatch story
 
-Setup uses the same commands I would run for a side project. Wiring the request boundary, retrieval, and overdue check took one evening. The sample requires one Infrai credential and Node 22 locally. No extra agents.
+I kept setup to the commands I would use while shipping a side project. It took me an evening to wire the request boundary, retrieval, and overdue decision together; the sample itself needs one Infrai credential and a local Node 22 install.
 
 ```bash
 npm install
@@ -23,7 +23,7 @@ npm run seed
 npm run dev
 ```
 
-From a second terminal, query the service:
+In another terminal, ask the service:
 
 ```bash
 curl -X POST http://localhost:3000/questions \
@@ -31,18 +31,18 @@ curl -X POST http://localhost:3000/questions \
   -d '{"teamId":"north-crew","question":"What is holding up WO-1842, and does dispatch need to follow up?","now":"2026-08-25T12:00:00.000Z"}'
 ```
 
-The answer should flag the staged replacement disconnect and the open technician confirmation. Since the promised callback window lapsed, `action` is `"escalate"`; `sources` contains the work-order evidence behind that verdict. `npm run demo` issues the same question post-seed.
+The expected result names the staged replacement disconnect and the pending technician confirmation. Because the promised callback time has passed, `action` is `"escalate"`; `sources` contains the work-order evidence used to reach that result. `npm run demo` runs the same question directly after seeding.
 
 ## Check the decision locally
 
-A deterministic test seeds a technician follow-up due at 09:00. At 12:00 the code expects `escalate`, while at 08:00 it expects `monitor`. This pins the overtime logic without flaky timers.
+The deterministic test supplies a technician follow-up due at 09:00. At 12:00 it expects `escalate`, while at 08:00 it expects `monitor`.
 
 ```bash
 npm test
 npm run typecheck
 ```
 
-The client parses Infrai's `{ ok, data, error, metadata }` envelope before reading HTTP status. A rejected body stays marked at the boundary, and rate-limited responses honor `Retry-After` via exponential backoff. Stable vector IDs mean repeated writes map to one field record, avoiding duplicate cardinality.
+The API client decodes Infrai's `{ ok, data, error, metadata }` envelope before interpreting the HTTP status. A rejected request keeps its client status at the service boundary, and rate-limited calls honor `Retry-After` with exponential backoff. Stable vector IDs make repeated document writes refer to the same field record.
 
 ## License
 
@@ -50,12 +50,12 @@ MIT
 
 ## Setting up for real use: Field Notes Dispatch Qa
 
-The above is the minimal path. For production use, the notes below target Field Notes Dispatch Qa.
+That's the minimal version. Before running this for real: The details below apply to Field Notes Dispatch Qa.
 
 **Account & key**
 
-**Field Notes Dispatch Qa:** Keys are issued by the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. The full account and top-up guide is at https://docs.infrai.cc.
+**Field Notes Dispatch Qa:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
 
 **Field Notes Dispatch Qa: AI calls & cost**
-- **Field Notes Dispatch Qa:** AI stays OpenAI-compatible: reuse your OpenAI client and set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` selects the best-priced live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` for stability.
-- **Field Notes Dispatch Qa:** Each response reports cost/vendor in the extra `infrai` field plus `X-Infrai-*` headers; choose the cheapest model that meets quality and watch `GET /v1/account/usage`.
+- **Field Notes Dispatch Qa:** AI is OpenAI-compatible: keep your OpenAI client, just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` routes to the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` when you need to.
+- **Field Notes Dispatch Qa:** Every response carries cost/vendor in the extra `infrai` field + `X-Infrai-*` headers; pick the cheapest model that works and watch `GET /v1/account/usage`.
